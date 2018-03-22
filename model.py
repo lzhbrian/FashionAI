@@ -1087,7 +1087,33 @@ def mrcnn_class_loss_graph(target_class_ids, pred_class_logits,
     # to the loss to get a correct mean.
     loss = tf.reduce_sum(loss) / tf.reduce_sum(pred_active)
     return loss
+def mask_class_loss_graph(target_mask_class, pred_class, target_class_ids):
+    """Loss for Mask class R-CNN whether key points are in picture.
 
+        target_mask_class: [batch, num_rois, 14(number of keypoints)]
+        pred_class: [batch, num_rois, num_classes, 3]
+        target_class_ids: [batch, num_rois]. Integer class IDs.
+    """
+    # Reshape to merge batch and roi dimensions for simplicity.
+    target_mask_class = tf.cast(target_mask_class, tf.int64)
+    target_class_ids = K.reshape(target_class_ids, (-1,))
+    pred_class = K.reshape(pred_class, (-1, 24, K.int_shape(pred_class)[3]))
+    target_mask_class = tf.cast(K.reshape(target_mask_class, (-1, 24)), tf.int64)
+
+    positive_roi_ix = tf.where(target_class_ids > 0)[:, 0]
+
+    # Gather the positive classes (predicted and true) that contribute to loss
+    target_class = tf.gather(target_mask_class, positive_roi_ix)
+    pred_class = tf.gather(pred_class, positive_roi_ix)
+
+    # Loss
+    loss = K.switch(tf.size(target_class) > 0,
+                    lambda: tf.nn.sparse_softmax_cross_entropy_with_logits(labels=target_class, logits=pred_class),
+                    lambda: tf.constant(0.0))
+    # Computer loss mean. Use only predictions that contribute
+    # to the loss to get a correct mean.
+    loss = tf.reduce_mean(loss)
+    return loss
 
 def mrcnn_bbox_loss_graph(target_bbox, target_class_ids, pred_bbox):
     """Loss for Mask R-CNN bounding box refinement.
