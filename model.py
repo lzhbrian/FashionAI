@@ -1087,7 +1087,33 @@ def mrcnn_class_loss_graph(target_class_ids, pred_class_logits,
     # to the loss to get a correct mean.
     loss = tf.reduce_sum(loss) / tf.reduce_sum(pred_active)
     return loss
+def mask_class_loss_graph(target_mask_class, pred_class, target_class_ids):
+    """Loss for Mask class R-CNN whether key points are in picture.
 
+        target_mask_class: [batch, num_rois, 14(number of keypoints)]
+        pred_class: [batch, num_rois, num_classes, 3]
+        target_class_ids: [batch, num_rois]. Integer class IDs.
+    """
+    # Reshape to merge batch and roi dimensions for simplicity.
+    target_mask_class = tf.cast(target_mask_class, tf.int64)
+    target_class_ids = K.reshape(target_class_ids, (-1,))
+    pred_class = K.reshape(pred_class, (-1, 24, K.int_shape(pred_class)[3]))
+    target_mask_class = tf.cast(K.reshape(target_mask_class, (-1, 24)), tf.int64)
+
+    positive_roi_ix = tf.where(target_class_ids > 0)[:, 0]
+
+    # Gather the positive classes (predicted and true) that contribute to loss
+    target_class = tf.gather(target_mask_class, positive_roi_ix)
+    pred_class = tf.gather(pred_class, positive_roi_ix)
+
+    # Loss
+    loss = K.switch(tf.size(target_class) > 0,
+                    lambda: tf.nn.sparse_softmax_cross_entropy_with_logits(labels=target_class, logits=pred_class),
+                    lambda: tf.constant(0.0))
+    # Computer loss mean. Use only predictions that contribute
+    # to the loss to get a correct mean.
+    loss = tf.reduce_mean(loss)
+    return loss
 
 def mrcnn_bbox_loss_graph(target_bbox, target_class_ids, pred_bbox):
     """Loss for Mask R-CNN bounding box refinement.
@@ -1798,6 +1824,11 @@ class MaskRCNN():
                 shape=[None, 4], name="input_gt_boxes", dtype=tf.float32)
             # Normalize coordinates
             h, w = K.shape(input_image)[1], K.shape(input_image)[2]
+            '''
+            add_class[h,w,h,w]
+            for i in range(15):
+                add_class.append(1)
+            '''
             image_scale = K.cast(K.stack([h, w, h, w], axis=0), tf.float32)
             gt_boxes = KL.Lambda(lambda x: x / image_scale)(input_gt_boxes)
             # 3. GT Masks (zero padded)
@@ -1898,12 +1929,14 @@ class MaskRCNN():
             # Subsamples proposals and generates target outputs for training
             # Note that proposal class IDs, gt_boxes, and gt_masks are zero
             # padded. Equally, returned rois and targets are zero padded.
+            '''不用做分类所以输入去掉traget_class_ids,多了一个target_mask_classids？？？'''
             rois, target_class_ids, target_bbox, target_mask =\
                 DetectionTargetLayer(config, name="proposal_targets")([
                     target_rois, input_gt_class_ids, gt_boxes, input_gt_masks])
 
             # Network Heads
             # TODO: verify that this handles zero padded ROIs
+            '''要输出mrcnn_class_mask'''
             mrcnn_class_logits, mrcnn_class, mrcnn_bbox =\
                 fpn_classifier_graph(rois, mrcnn_feature_maps, config.IMAGE_SHAPE,
                                      config.POOL_SIZE, config.NUM_CLASSES)
@@ -1923,6 +1956,8 @@ class MaskRCNN():
                 [input_rpn_bbox, input_rpn_match, rpn_bbox])
             class_loss = KL.Lambda(lambda x: mrcnn_class_loss_graph(*x), name="mrcnn_class_loss")(
                 [target_class_ids, mrcnn_class_logits, active_class_ids])
+            '''添加mask_class_loss损失函数'''
+            
             bbox_loss = KL.Lambda(lambda x: mrcnn_bbox_loss_graph(*x), name="mrcnn_bbox_loss")(
                 [target_bbox, target_class_ids, mrcnn_bbox])
             mask_loss = KL.Lambda(lambda x: mrcnn_mask_loss_graph(*x), name="mrcnn_mask_loss")(
@@ -1937,10 +1972,12 @@ class MaskRCNN():
                        mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask,
                        rpn_rois, output_rois,
                        rpn_class_loss, rpn_bbox_loss, class_loss, bbox_loss, mask_loss]
+            '''mask_class_loss,active_class_ids'''
             model = KM.Model(inputs, outputs, name='mask_rcnn')
         else:
             # Network Heads
             # Proposal classifier and BBox regressor heads
+            '''添加mrcnn_class_mask'''
             mrcnn_class_logits, mrcnn_class, mrcnn_bbox =\
                 fpn_classifier_graph(rpn_rois, mrcnn_feature_maps, config.IMAGE_SHAPE,
                                      config.POOL_SIZE, config.NUM_CLASSES)
@@ -1965,8 +2002,8 @@ class MaskRCNN():
 
             model = KM.Model([input_image, input_image_meta],
                              [detections, mrcnn_class, mrcnn_bbox,
-                                 mrcnn_mask, rpn_rois, rpn_class, rpn_bbox],
-                             name='mask_rcnn')
+                              mrcnn_mask, rpn_rois, rpn_class, rpn_bbox],
+                              name='mask_rcnn')
 
         # Add multi-GPU support.
         if config.GPU_COUNT > 1:
